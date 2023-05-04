@@ -1,198 +1,98 @@
-import asyncio
-from binance.client import AsyncClient, BinanceSocketManager
-from binance.enums import *
-import talib
-import numpy as np
+# 获取用户余额信息
+def get_account_balance(symbol):
+    endpoint = "/fapi/v2/balance"
+    header = create_header()
+    params = create_params(symbol=symbol)
+    url = create_url(endpoint)
+    return get_request(url=url, headers=header, params=params)
 
-# 修改此处的API密钥和其他参数
-API_KEY = 'your_api_key'
-API_SECRET = 'your_api_secret'
-SYMBOL = 'BTCUSDT'
-QUANTITY = 0.001 # 下单数量
-MAX_POSITION = 0.1 # 最大持仓量，以BTC为单位
+# 获取K线数据
+def get_klines(symbol, interval):
+    endpoint = "/fapi/v1/klines"
+    header = create_header()
+    params = create_params(symbol=symbol, interval=interval)
+    url = create_url(endpoint)
+    return get_request(url=url, headers=header, params=params)
 
-# 初始化变量
-entry_price_long = None
-entry_price_short = None
-enabled = False
-max_retries = 5
-retries = 0
-take_profit_price = None
+# 计算移动平均线
+def calculate_ma(klines, period):
+    closes = [float(kline[4]) for kline in klines[-period:]]
+    return sum(closes) / len(closes)
 
-# 分段显示的函数
-def split_text(text, limit):
-    chunks = []
-    words = text.split()
-    current_chunk = ""
+# 定义趋势指标策略
+def trend_indicator_strategy(symbol, interval):
+    # 获取当前K线数据
+    klines = get_klines(symbol=symbol, interval=interval)
 
-    for word in words:
-        if len(current_chunk + word) <= limit:
-            current_chunk += word + " "
-        else:
-            chunks.append(current_chunk.strip())
-            current_chunk = word + " "
+    # 计算5日和20日移动平均线
+    ma5 = calculate_ma(klines, 5)
+    ma20 = calculate_ma(klines, 20)
 
-    if current_chunk:
-        chunks.append(current_chunk.strip())
+    # 根据移动平均线确定交易方向
+    if ma5 > ma20:
+        side = "BUY"
+    else:
+        side = "SELL"
 
-    return chunks
+    # 下单交易
+    quantity = 0.001
+    price = float(klines[-1][4])
+    order_type = "LIMIT"
+    result = create_order(symbol=symbol, side=side, quantity=quantity, price=price, order_type=order_type)
 
-# 补仓或开仓
-async def open_position(prices, ma):
-    global retries, entry_price_long, entry_price_short
-    
-    position_info = await client.futures_position_information(symbol=SYMBOL)
-    current_qty_long = float(position_info[0]["positionAmt"])
-    current_qty_short = float(position_info[1]["positionAmt"])
+    return result
 
-    if current_qty_long == 0 and retries < max_retries and prices[-1] < ma[-1]:
-        retries += 1
-        await asyncio.sleep(60) # 等待一段时间再尝试补仓
-        await open_position(prices, ma)
-        
-    if entry_price_long is None and entry_price_short is None and rsi[-1] > 70 and prices[-1] > ma[-1]:
-        order_long = await client.futures_create_order(
-            symbol=SYMBOL,
-            side=SIDE_BUY,
-            type=ORDER_TYPE_MARKET,
-            quantity=QUANTITY,
-            reduceOnly=True,
-            positionSide=POSITION_SIDE_LONG)
-        entry_price_long = prices[-1]
+# 定义顺势而为策略
+def trend_following_strategy(symbol, interval):
+    # 获取当前K线数据
+    klines = get_klines(symbol=symbol, interval=interval)
+    current_price = float(klines[-1][4])
+    previous_price = float(klines[-2][4])
 
-        order_short = await client.futures_create_order(
-            symbol=SYMBOL,
-            side=SIDE_SELL,
-            type=ORDER_TYPE_MARKET,
-            quantity=QUANTITY,
-            reduceOnly=True,
-            positionSide=POSITION_SIDE_SHORT)
-        entry_price_short = prices[-1]
-        retries = 0
-    elif entry_price_long is not None and entry_price_short is not None:
-        # 更新持仓信息和止损/止盈价格
-        position_info = await client.futures_position_information(symbol=SYMBOL)
-        current_qty_long = float(position_info[0]["positionAmt"])
-        current_qty_short = float(position_info[1]["positionAmt"])
-        stop_loss_price_long = entry_price_long * 0.98
-        stop_loss_price_short = entry_price_short * 1.02
+    # 根据价格变化确定交易方向
+    if current_price > previous_price:
+        side = "BUY"
+    else:
+        side = "SELL"
 
-        if current_qty_long < MAX_POSITION and prices[-1] > ma[-1]:
-            qty = QUANTITY
-            order_long = await client.futures_create_order(
-                symbol=SYMBOL,
-                side=SIDE_BUY,
-                type=ORDER_TYPE_MARKET,
-                quantity=qty,
-                reduceOnly=True,
-                positionSide=POSITION_SIDE_LONG)
-            entry_price_long = (entry_price_long * (qty - 0.001) + prices[-1] * 0.001) / qty
+    # 下单交易
+    quantity = 0.001
+    price = current_price
+order_type = "LIMIT"
+    result = create_order(symbol=symbol, side=side, quantity=quantity, price=price, order_type=order_type)
 
-            order_short = await client.futures_create_order(
-                symbol=SYMBOL,
-                side=SIDE_SELL,
-                type=ORDER_TYPE_MARKET,
-                quantity=qty,
-                reduceOnly=True,
-                positionSide=POSITION_SIDE_SHORT)
-            entry_price_short = (entry_price_short * (qty - 0.001) + prices[-1] * 0.001) / qty
+    return result
 
-        elif current_qty_short < MAX_POSITION and prices[-1] < ma[-1]:
-            qty = QUANTITY
-            order_short = await client.futures_create_order(
-                symbol=SYMBOL,
-                side=SIDE_BUY,
-                type=ORDER_TYPE_MARKET,
-                quantity=qty,
-                reduceOnly=True,
-                positionSide=POSITION_SIDE_SHORT)
-            entry_price_short = (entry_price_short * (qty - 0.001) + prices[-1] * 0.001) / qty
+# 示例代码
+if __name__ == "__main__":
+    # 设置参数
+    symbol = "BTCUSDT"
+    interval = "1m"
+    use_trend_indicator = True
+    use_trend_following_strategy = True
 
-            order_long = await client.futures_create_order(
-                symbol=SYMBOL,
-                side=SIDE_SELL,
-                type=ORDER_TYPE_MARKET,
-                quantity=qty,
-                reduceOnly
-            positionSide=POSITION_SIDE_LONG)
-            entry_price_long = (entry_price_long * (qty - 0.001) + prices[-1] * 0.001) / qty
+    if use_trend_indicator:
+        # 使用趋势指标策略
+        trend_indicator_strategy(symbol=symbol, interval=interval)
+    elif use_trend_following_strategy:
+        # 使用顺势而为策略
+        trend_following_strategy(symbol=symbol, interval=interval)
+    else:
+        # 不使用任何策略
+        print("未开启任何策略")
 
-# 更新止损/止盈价格
-if entry_price_long is not None:
-    if take_profit_price is None or prices[-1] > take_profit_price:
-        take_profit_price = entry_price_long * 1.02 # 2%的利润率作为止盈价
-    elif prices[-1] < stop_loss_price_long:
-        order_long = await client.futures_create_order(
-            symbol=SYMBOL,
-            side=SIDE_SELL,
-            type=ORDER_TYPE_MARKET,
-            quantity=current_qty_long,
-            reduceOnly=True,
-            positionSide=POSITION_SIDE_LONG)
-        entry_price_long = None
-        take_profit_price = None
+    # 获取用户余额信息
+    account_balance = get_account_balance(symbol=symbol)
+    print(f"当前余额: {account_balance}")
 
-if entry_price_short is not None:
-    if take_profit_price is None or prices[-1] < take_profit_price:
-        take_profit_price = entry_price_short * 0.98 # 2%的利润率作为止盈价
-    elif prices[-1] > stop_loss_price_short:
-        order_short = await client.futures_create_order(
-            symbol=SYMBOL,
-            side=SIDE_BUY,
-            type=ORDER_TYPE_MARKET,
-            quantity=current_qty_short,
-            reduceOnly=True,
-            positionSide=POSITION_SIDE_SHORT)
-        entry_price_short = None
-        take_profit_price = None
+    # 下单交易
+    quantity = 0.001
+    price = 50000
+    order_type = "LIMIT"
+    result = create_order(symbol=symbol, side="BUY", quantity=quantity, price=price, order_type=order_type)
+    print(f"下单交易结果: {result}")
 
-async def main():
-    global enabled, entry_price_long, entry_price_short
-    print("正在连接Binance WebSocket...")
-    bsm = BinanceSocketManager(client)
-    klines_socket = bsm.kline_futures_socket(SYMBOL, interval=KLINE_INTERVAL_1MINUTE)
-    rsi_socket = bsm.kline_futures_socket(SYMBOL, interval=KLINE_INTERVAL_5MINUTE)
-
-    # 订阅K线数据
-    klines_buffer = []
-    def process_klines_message(msg):
-        nonlocal klines_buffer
-        klines_buffer.append(float(msg['k']['c']))
-        if len(klines_buffer) > 20:
-            klines_buffer = klines_buffer[-20:]
-        if len(klines_buffer) == 20:
-            ma = talib.SMA(np.array(klines_buffer), timeperiod=20)
-            asyncio.ensure_future(open_position(klines_buffer, ma))
-
-    conn_key_klines = klines_socket.__enter__()
-    klines_socket.subscribe(conn_key_klines, process_klines_message)
-
-    # 订阅RSI指标数据
-    rsi_buffer = []
-    def process_rsi_message(msg):
-        nonlocal rsi_buffer
-        kline = msg['k']
-        if len(rsi_buffer) and kline['t'] == rsi_buffer[-1]['t']:
-            rsi_buffer[-1] = kline
-        else:
-            rsi_buffer.append(kline)
-        if len(rsi_buffer) > 14:
-            rsi_buffer = rsi_buffer[-14:]
-        if len(rsi_buffer) == 14:
-            closes = [float(x['c']) for x in rsi_buffer]
-            rsi = talib.RSI(np.array(closes), timeperiod=14)[-1]
-            if rsi > 70:
-                enabled = True
-            elif rsi < 30:
-                enabled = False
-
-    conn_key_rsi = rsi_socket.__enter__()
-    rsi_socket.subscribe(conn_key_rsi, process_rsi_message)
-
-    while True:
-        await asyncio.sleep(1)
-
-if __name__ == '__main__':
-    loop = asyncio.get_event_loop()
-    client = AsyncClient(API_KEY, API_SECRET)
-    loop.run_until_complete(main())                
+    # 撤销订单
+    order_id = result["orderId"]
+    cancel_result = cancel_order(symbol=symbol, order_id=order_id)
+    print(f"撤销订单结果: {cancel_result}")
