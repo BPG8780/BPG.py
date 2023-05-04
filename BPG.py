@@ -58,7 +58,7 @@ def trend_following_strategy(symbol, interval):
     # 下单交易
     quantity = 0.001
     price = current_price
-order_type = "LIMIT"
+    order_type = "LIMIT"
     result = create_order(symbol=symbol, side=side, quantity=quantity, price=price, order_type=order_type)
 
     return result
