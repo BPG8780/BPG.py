@@ -1,98 +1,82 @@
-# 获取用户余额信息
-def get_account_balance(symbol):
-    endpoint = "/fapi/v2/balance"
-    header = create_header()
-    params = create_params(symbol=symbol)
-    url = create_url(endpoint)
-    return get_request(url=url, headers=header, params=params)
+import requests
+import time
+import hashlib
+import hmac
+import urllib.parse
+import json
+import websocket
+import getpass
 
-# 获取K线数据
-def get_klines(symbol, interval):
-    endpoint = "/fapi/v1/klines"
-    header = create_header()
-    params = create_params(symbol=symbol, interval=interval)
-    url = create_url(endpoint)
-    return get_request(url=url, headers=header, params=params)
+# Get API key and secret key from user input
+api_key = getpass.getpass(prompt="Enter your API Key: ")
+secret_key = getpass.getpass(prompt="Enter your Secret Key: ")
 
-# 计算移动平均线
-def calculate_ma(klines, period):
-    closes = [float(kline[4]) for kline in klines[-period:]]
-    return sum(closes) / len(closes)
+base_url = 'https://fapi.binance.com'
+symbol = 'BTCUSD_210625'
 
-# 定义趋势指标策略
-def trend_indicator_strategy(symbol, interval):
-    # 获取当前K线数据
-    klines = get_klines(symbol=symbol, interval=interval)
+def generate_signature(params):
+    query_string = '&'.join(["{}={}".format(d, params[d]) for d in params])
+    return hmac.new(secret_key.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
 
-    # 计算5日和20日移动平均线
-    ma5 = calculate_ma(klines, 5)
-    ma20 = calculate_ma(klines, 20)
+def get_headers(querystring):
+    headers = {
+        'X-MBX-APIKEY': api_key,
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+    return headers
 
-    # 根据移动平均线确定交易方向
-    if ma5 > ma20:
-        side = "BUY"
-    else:
-        side = "SELL"
+def get_mark_price(symbol):
+    endpoint = '/fapi/v1/premiumIndex'
+    url = f'{base_url}{endpoint}?symbol={symbol}'
+    response = requests.get(url, headers=get_headers({}))
+    return response.json()
 
-    # 下单交易
-    quantity = 0.001
-    price = float(klines[-1][4])
-    order_type = "LIMIT"
-    result = create_order(symbol=symbol, side=side, quantity=quantity, price=price, order_type=order_type)
+def create_order(symbol, side, quantity, price):
+    endpoint = '/fapi/v1/order'
+    params = {
+        'symbol': symbol,
+        'side': side,
+        'type': 'LIMIT',
+        'timeInForce': 'GTC',
+        'quantity': quantity,
+        'price': price,
+        'recvWindow': 5000,
+        'timestamp': int(time.time() * 1000)
+    }
+    signature = generate_signature(params)
+    headers = get_headers({'signature': signature})
+    url = f'{base_url}{endpoint}?{urllib.parse.urlencode(params)}&signature={signature}'
+    response = requests.post(url, headers=headers)
+    return response.json()
 
-    return result
+def on_open(ws):
+    print('Connection opened')
 
-# 定义顺势而为策略
-def trend_following_strategy(symbol, interval):
-    # 获取当前K线数据
-    klines = get_klines(symbol=symbol, interval=interval)
-    current_price = float(klines[-1][4])
-    previous_price = float(klines[-2][4])
+    # Subscribe to price updates for U-contracts
+    subscribe_msg = {
+        'method': 'SUBSCRIBE',
+        'params': [
+            f'{symbol.lower()}@markPrice'
+        ],
+        'id': 1
+    }
+    ws.send(json.dumps(subscribe_msg))
 
-    # 根据价格变化确定交易方向
-    if current_price > previous_price:
-        side = "BUY"
-    else:
-        side = "SELL"
+def on_close(ws):
+    print('Connection closed')
 
-    # 下单交易
-    quantity = 0.001
-    price = current_price
-    order_type = "LIMIT"
-    result = create_order(symbol=symbol, side=side, quantity=quantity, price=price, order_type=order_type)
-
-    return result
-
-# 示例代码
-if __name__ == "__main__":
-    # 设置参数
-    symbol = "BTCUSDT"
-    interval = "1m"
-    use_trend_indicator = True
-    use_trend_following_strategy = True
-
-    if use_trend_indicator:
-        # 使用趋势指标策略
-        trend_indicator_strategy(symbol=symbol, interval=interval)
-    elif use_trend_following_strategy:
-        # 使用顺势而为策略
-        trend_following_strategy(symbol=symbol, interval=interval)
-    else:
-        # 不使用任何策略
-        print("未开启任何策略")
-
-    # 获取用户余额信息
-    account_balance = get_account_balance(symbol=symbol)
-    print(f"当前余额: {account_balance}")
-
-    # 下单交易
-    quantity = 0.001
-    price = 50000
-    order_type = "LIMIT"
-    result = create_order(symbol=symbol, side="BUY", quantity=quantity, price=price, order_type=order_type)
-    print(f"下单交易结果: {result}")
-
-    # 撤销订单
-    order_id = result["orderId"]
-    cancel_result = cancel_order(symbol=symbol, order_id=order_id)
-    print(f"撤销订单结果: {cancel_result}")
+def on_message(ws, message):
+    data = json.loads(message)
+    if 'result' not in data:
+        mark_price = float(data['p'])
+        quantity = 10
+        buy_price = round(mark_price * 0.95, 2) # Place order at 95% of current mark price
+        order = create_order(symbol, 'BUY', quantity, buy_price)
+        print(f"New Buy Order: {order}")
+    
+socket = f"wss://fstream.binance.com/ws"
+ws = websocket.WebSocketApp(socket,
+                            on_open=on_open,
+                            on_close=on_close,
+                            on_message=on_message)
+ws.run_forever()
